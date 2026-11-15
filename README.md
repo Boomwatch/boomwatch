@@ -53,8 +53,7 @@ npm install -g wrangler
 wrangler login
 wrangler d1 execute boomwatch-db --remote --file=./shared/schema.sql
 wrangler dev
-
-```bash
+```
 
 ## Notes
 
