@@ -1,0 +1,11 @@
+name = "boomwatch-ingest"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+
+[triggers]
+crons = ["0 6 * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "boomwatch-db"
+database_id = "49a99423-9462-440a-8400-46722e1dc357"
