@@ -60,12 +60,20 @@
   .adv-toggle { background: none; border: none; color: var(--dim); font-size: 0.75rem;
                 cursor: pointer; padding: 0.5rem 0 0; text-decoration: underline; }
   .hidden { display: none; }
+  .src-live { color: var(--good); }
+  .src-cache { color: var(--warn); }
+  #report-msg { font-size: 0.85rem; margin-top: 0.6rem; min-height: 1.2rem; }
+  #report-msg.ok { color: var(--good); }
+  #report-msg.err { color: var(--warn); }
+  #stamp-display { font-size: 0.8rem; color: var(--good); margin-top: 0.3rem;
+                   font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
 
 <h1>BoomWatch — Boom Window Calculator</h1>
-<p class="sub">Predicted sonic boom arrival times at your location for Vandenberg SFB launches.</p>
+<p class="sub">Predicted sonic boom arrival times at your location for Vandenberg SFB
+   launches — plus a report form to log what you actually heard.</p>
 
 <div class="panel">
   <h2>Your location</h2>
@@ -101,11 +109,59 @@
 <div class="panel">
   <h2>Upcoming launches</h2>
   <div id="launches"></div>
-  <p class="footnote" id="stale-note">
-    ⚠ Embedded schedule — verify against a live source (spacelaunchschedule.com or
-    SpaceX) before planning an observation. Recovery type is <code>unknown</code>
-    for these missions until confirmed; descent windows show only if RTLS occurs.
-  </p>
+  <p class="footnote" id="source-note"></p>
+</div>
+
+<div class="panel">
+  <h2>File a boom report</h2>
+  <p class="sub" style="margin-bottom:0.75rem">Tell the model what you heard (or didn't).
+     Reports feed the Bayesian verdict engine. Your current location
+     (<span id="report-loc">—</span>) is attached automatically.</p>
+  <div class="row">
+    <div>
+      <label for="report-launch">Launch</label>
+      <select id="report-launch"><option value="">— loading —</option></select>
+    </div>
+    <div>
+      <label for="heard">Did you hear it?</label>
+      <select id="heard">
+        <option value="yes" selected>Yes — heard boom(s)</option>
+        <option value="no">No — silence</option>
+        <option value="unsure">Unsure / faint</option>
+      </select>
+    </div>
+  </div>
+  <div class="row" style="margin-top:0.75rem">
+    <div>
+      <label for="magnitude">Loudness (1–5)</label>
+      <select id="magnitude">
+        <option value="" selected>— skipped —</option>
+        <option value="1">1 · barely felt</option>
+        <option value="2">2 · faint thump</option>
+        <option value="3">3 · clear boom</option>
+        <option value="4">4 · sharp/rattling</option>
+        <option value="5">5 · house-shaking</option>
+      </select>
+    </div>
+    <div>
+      <label for="boom-seq">Boom # (if multiple)</label>
+      <select id="boom-seq">
+        <option value="1" selected>1st boom</option>
+        <option value="2">2nd boom</option>
+        <option value="3">3rd boom</option>
+      </select>
+    </div>
+    <div style="flex:0">
+      <label>&nbsp;</label>
+      <button id="stamp" class="ghost" type="button">Stamp time NOW</button>
+    </div>
+  </div>
+  <div id="stamp-display"></div>
+  <button id="submit-report" type="button" style="margin-top:0.75rem">Submit report</button>
+  <div id="report-msg"></div>
+  <p class="footnote">Timestamp the moment you hear it, then finish the form at leisure —
+     the stamp is the wall-clock datum the model calibrates against. Note: filing requires
+     the page to be served over http(s) (localhost or pages.dev), not opened as a file.</p>
 </div>
 
 <div class="panel">
@@ -132,11 +188,13 @@
   <p class="footnote" style="font-size:0.8rem; color:var(--muted)">
     Surface sound speed 343 m/s. Ascent boom sourced at SLC-4E (v0 approximation of the
     sweeping boom carpet). Descent boom sourced at LZ-4, conditioned on an RTLS recovery,
-    which is unconfirmed for these missions. Each window spans profile slack
+    which is unconfirmed for most missions. Each window spans profile slack
     (ascent −60/+180 s, descent −120/+240 s around Mach crossover) plus propagation delay;
-    the peak is crossover + propagation — the most likely arrival. Atmospheric refraction
-    and winds can shift arrival by tens of seconds — treat windows as expectations,
-    not appointments. Calibration anchor: Ventura, 133 km from LZ-4, observed boom ≈ T+8 min.
+    the peak is crossover + propagation — the most likely arrival. Crossover times come
+    from the live prediction engine when available (currently fitted at T+60 s ascent).
+    Atmospheric refraction and winds can shift arrival by tens of seconds — treat windows
+    as expectations, not appointments. Calibration anchor: Ventura, 133 km from LZ-4,
+    observed boom ≈ T+8 min.
   </p>
 </div>
 
@@ -154,6 +212,9 @@ const LZ4         = { lat: 34.633, lon: -120.615 };  // descent boom source
 const ASCENT = { crossover: 60,  pre: 60,  post: 180 }; // T+ seconds, profile f9_rtls_ascent
 const DESCENT= { crossover: 600, pre: 120, post: 240 }; // T+ seconds, profile f9_rtls_descent
 
+/* Live API (Batch 4 worker) — serves launches + predictions from D1 */
+const API_BASE = "https://boomwatch-api.cloudflare-sporty919.workers.dev";
+
 /* Preset locations — approximate city centers */
 const CITIES = {
   santabarbara: { name: "Santa Barbara", lat: 34.4208, lon: -119.6983 },
@@ -162,11 +223,9 @@ const CITIES = {
   camarillo:    { name: "Camarillo",     lat: 34.2164, lon: -119.0373 }
 };
 
-/* Embedded launch list — MANUALLY SYNCED until the api worker exists.
-   Update from: wrangler d1 execute boomwatch-db --remote \
-     --command "SELECT mission, net_utc, recovery_type FROM launches ORDER BY net_utc"
-   Verify dates against a live schedule (lldev data is stale). */
-const LAUNCHES = [
+/* Fallback launch list — used ONLY if the live API is unreachable.
+   Manually synced snapshot; the live fetch overrides it whenever it can. */
+const FALLBACK_LAUNCHES = [
   { name: "USSF-317",  net: "2026-11-18T03:14:00Z", rtls: false },
   { name: "USSF-266",  net: "2026-11-18T16:49:00Z", rtls: false },
   { name: "NROL-136",  net: "2026-11-21T12:30:00Z", rtls: false },
@@ -174,6 +233,16 @@ const LAUNCHES = [
   { name: "OneWeb 21", net: "2026-11-30T00:00:00Z", rtls: false },
   { name: "Starlink Group 15-21", net: "2026-11-30T00:00:00Z", rtls: false },
 ];
+
+/* ---------- launch data state ---------- */
+
+/* Normalized shape used everywhere downstream:
+   { id?:string, name:string, net:string(ISO), rtls:boolean,
+     preds?: [{ boom_seq, profile_id, crossover, confidence }] }
+   `id` present ⇒ launch exists in D1 ⇒ reportable. */
+let launchData = FALLBACK_LAUNCHES;
+let dataSource = "fallback";     // "live" | "live-stale" | "fallback"
+let fetchedAt = null;            // Date of last successful fetch
 
 /* ---------- geometry & model (mirror of shared/sites.ts) ---------- */
 
@@ -199,6 +268,67 @@ function boomWindow(profile, src, obsLat, obsLon) {
     propDelay,
     distKm: distM / 1000
   };
+}
+
+/* ---------- live API ---------- */
+
+/* Convert the api worker's prediction-joined rows into normalized launches.
+   Rows arrive as one-per-prediction (LEFT JOIN), so group by launch id. */
+function normalizeApiRows(rows) {
+  const map = new Map();
+  for (const row of rows) {
+    if (!row || !row.id || !row.net_utc) continue;
+    let L = map.get(row.id);
+    if (!L) {
+      L = { id: row.id, name: row.mission || "Unnamed",
+            net: row.net_utc, rtls: row.recovery_type === "rtls", preds: [] };
+      map.set(row.id, L);
+    }
+    if (row.profile_id) {
+      L.preds.push({
+        boom_seq: row.boom_seq ?? 1,
+        profile_id: row.profile_id,
+        crossover: Number.isFinite(row.crossover_s) ? row.crossover_s : null,
+        confidence: Number.isFinite(row.confidence) ? row.confidence : null
+      });
+    }
+  }
+  return [...map.values()].sort((a, b) => a.net.localeCompare(b.net));
+}
+
+async function fetchLaunches() {
+  try {
+    const r = await fetch(API_BASE + "/launches");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const body = await r.json();
+    if (!body.ok || !Array.isArray(body.launches) || body.launches.length === 0)
+      throw new Error("empty or malformed payload");
+    launchData = normalizeApiRows(body.launches);
+    dataSource = "live";
+    fetchedAt = new Date();
+  } catch (e) {
+    // Keep whatever we have. If we never got live data, we're on the fallback.
+    if (dataSource !== "live") dataSource = "fallback";
+  }
+  render();
+  renderSourceNote();
+  buildReportDropdown();
+}
+
+function renderSourceNote() {
+  const el = document.getElementById("source-note");
+  if (dataSource === "live") {
+    el.className = "footnote src-live";
+    el.textContent = "● Live data from the BoomWatch prediction engine — fetched " +
+      fetchedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" }) +
+      ". Auto-refreshes every 5 minutes.";
+  } else {
+    el.className = "footnote src-cache";
+    el.textContent = "⚠ Live API unreachable — showing embedded snapshot. Verify times " +
+      "against a live schedule (spacelaunchschedule.com or SpaceX) before planning an " +
+      "observation. Reports cannot be filed in this mode from a file:// page; serve via " +
+      "http://localhost:8000 (python3 -m http.server) to restore full function.";
+  }
 }
 
 /* ---------- formatting helpers ---------- */
@@ -243,7 +373,6 @@ function setCity(key) {
   const advDiv = document.getElementById("custom-loc");
   const toggleBtn = document.getElementById("toggle-adv");
   if (key === "custom") {
-    // reveal fields; wait for manual entry
     advDiv.classList.remove("hidden");
     toggleBtn.textContent = "Hide custom coordinates";
     document.getElementById("lat").focus();
@@ -271,7 +400,6 @@ function loadLoc() {
     const saved = JSON.parse(localStorage.getItem(LS_KEY));
     if (saved && Number.isFinite(saved.lat)) loc = saved;
   } catch (e) { /* fresh start */ }
-  // Sync UI to whatever's active: a matching city, or custom mode
   const sel = document.getElementById("city");
   const key = Object.keys(CITIES).find(isCityMatch);
   if (key) {
@@ -282,14 +410,27 @@ function loadLoc() {
     document.getElementById("custom-loc").classList.remove("hidden");
     document.getElementById("toggle-adv").textContent = "Hide custom coordinates";
     document.getElementById("lat").value = loc.lat.toFixed(4);
-    document.getElementById("lon").value = loc.lon.toFixed(4);
+    document.getElementById("lon").value  = loc.lon.toFixed(4);
     locLabel = `custom (${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)})`;
   }
 }
 
 /* ---------- rendering ---------- */
 
-function windowHtml(tag, w, netIso, cond) {
+// Pull a fitted crossover for a given profile from the launch's predictions,
+// falling back to the profile constant when absent (custom launches, etc.).
+function fittedCrossover(l, profileId, fallback) {
+  const p = (l.preds || []).find(p => p.profile_id === profileId);
+  return (p && Number.isFinite(p.crossover)) ? p.crossover : fallback;
+}
+function predConfidence(l, profileId) {
+  const p = (l.preds || []).find(p => p.profile_id === profileId);
+  return p ? p.confidence : null;
+}
+
+function windowHtml(tag, w, netIso, cond, confidence) {
+  const conf = (confidence != null && Number.isFinite(confidence))
+    ? ` · model P(boom) ≈ ${Math.round(confidence * 100)}%` : "";
   return `
     <div class="window${cond ? " cond" : ""}">
       <div class="tag">${tag}</div>
@@ -297,17 +438,18 @@ function windowHtml(tag, w, netIso, cond) {
         <span class="peak">peak ≈ ${fmtTplus(w.peak)}
         (${fmtLocal(netIso, w.peak)} local)</span></div>
       <div class="detail">${w.distKm.toFixed(0)} km from source ·
-        sound travel <b>${fmtDur(w.propDelay)}</b></div>
+        sound travel <b>${fmtDur(w.propDelay)}</b>${conf}</div>
     </div>`;
 }
 
 function launchCard(l) {
-  const ascentW  = boomWindow(ASCENT,  PAD_SLC4E, loc.lat, loc.lon);
-  const descentW = boomWindow(DESCENT, LZ4,       loc.lat, loc.lon);
+  const ascentProf  = { ...ASCENT,  crossover: fittedCrossover(l, "f9_rtls_ascent",  ASCENT.crossover) };
+  const descentProf = { ...DESCENT, crossover: fittedCrossover(l, "f9_rtls_descent", DESCENT.crossover) };
+  const ascentW   = boomWindow(ascentProf, PAD_SLC4E, loc.lat, loc.lon);
+  const descentW  = boomWindow(descentProf, LZ4,      loc.lat, loc.lon);
   const netMs = new Date(l.net).getTime();
   const tplusSec = (Date.now() - netMs) / 1000;
 
-  // Live status line
   let status;
   if (tplusSec < 0) {
     status = `Liftoff in <span id="clock">${fmtDur(-tplusSec)}</span>`;
@@ -317,9 +459,12 @@ function launchCard(l) {
     status = `Launched ${fmtTplus(tplusSec)} ago`;
   }
 
+  const ascConf = predConfidence(l, "f9_rtls_ascent");
   const badge = l.rtls
     ? `<span class="badge rtls">RTLS expected</span>`
-    : `<span class="badge">recovery unknown</span>`;
+    : ascConf != null
+      ? `<span class="badge">recovery unknown · P≈${Math.round(ascConf * 100)}%</span>`
+      : `<span class="badge">recovery unknown</span>`;
 
   return `
     <div class="launch-card">
@@ -329,16 +474,93 @@ function launchCard(l) {
       </div>
       <div class="net">NET: ${fmtNetLocal(l.net)}</div>
       <div class="status" style="margin-top:0.4rem">${status}</div>
-      ${windowHtml("Ascent boom (expected)", ascentW, l.net, false)}
-      ${windowHtml("Descent boom (only if RTLS — unconfirmed)", descentW, l.net, true)}
+      ${windowHtml("Ascent boom (expected)", ascentW, l.net, false, ascConf)}
+      ${windowHtml("Descent boom (only if RTLS — unconfirmed)", descentW, l.net, !l.rtls, null)}
     </div>`;
 }
 
 function render() {
   const container = document.getElementById("launches");
-  container.innerHTML = LAUNCHES.map(launchCard).join("");
+  container.innerHTML = launchData.map(launchCard).join("");
   document.getElementById("loc-note").textContent =
     `Observer: ${locLabel} · ${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}`;
+  document.getElementById("report-loc").textContent =
+    `${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}`;
+}
+
+/* ---------- report form ---------- */
+
+function buildReportDropdown() {
+  const sel = document.getElementById("report-launch");
+  const prev = sel.value;
+  const reportable = launchData.filter(l => l.id);
+  if (reportable.length === 0) {
+    sel.innerHTML = `<option value="">— no live launches available —</option>`;
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  sel.innerHTML = reportable.map(l =>
+    `<option value="${l.id}">${l.name} — ${fmtNetLocal(l.net)}</option>`
+  ).join("");
+  if (prev && reportable.some(l => l.id === prev)) sel.value = prev;
+}
+
+let reportStamp = null;
+
+function stampNow() {
+  reportStamp = new Date().toISOString();
+  const el = document.getElementById("stamp-display");
+  el.textContent = "Stamped: " + reportStamp +
+    " (" + new Date(reportStamp).toLocaleTimeString() + " local)";
+}
+
+function setReportMsg(text, cls) {
+  const el = document.getElementById("report-msg");
+  el.textContent = text;
+  el.className = cls || "";
+}
+
+async function submitReport() {
+  const launchId = document.getElementById("report-launch").value;
+  if (!launchId) { setReportMsg("Select a launch first.", "err"); return; }
+
+  const payload = {
+    launch_id: launchId,
+    heard: document.getElementById("heard").value,
+    boom_seq: parseInt(document.getElementById("boom-seq").value, 10) || 1,
+    lat: loc.lat,
+    lon: loc.lon
+  };
+  const mag = document.getElementById("magnitude").value;
+  if (mag !== "") payload.magnitude = parseInt(mag, 10);
+  if (reportStamp) payload.observed_utc = reportStamp;
+
+  const btn = document.getElementById("submit-report");
+  btn.disabled = true;
+  btn.textContent = "Sending…";
+  try {
+    const r = await fetch(API_BASE + "/report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const body = await r.json();
+    if (r.ok && body.ok) {
+      setReportMsg(`✓ Logged — report #${body.report_id}. Thank you.`, "ok");
+      reportStamp = null;
+      document.getElementById("stamp-display").textContent = "";
+    } else {
+      setReportMsg("Rejected: " + (body.error || "unknown error") +
+        (r.status === 404 ? " (launch not found in database)" : ""), "err");
+    }
+  } catch (e) {
+    setReportMsg("Network error — report NOT sent. If this page is a local file (file://), " +
+      "serve it from http://localhost:8000 first.", "err");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Submit report";
+  }
 }
 
 /* ---------- custom launch ---------- */
@@ -349,18 +571,22 @@ function addCustom() {
   if (!netEl.value) { alert("Enter a liftoff time."); return; }
   const iso = new Date(netEl.value).toISOString();
   const name = nameEl.value.trim() || "Custom launch";
-  LAUNCHES.unshift({ name, net: iso, rtls: false });
+  launchData.unshift({ name, net: iso, rtls: false });  // no id ⇒ not reportable
   render();
   nameEl.value = ""; netEl.value = "";
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
-/* ---------- live ticker: refresh countdown/elapsed periodically ---------- */
+/* ---------- live ticker: refresh countdown/elapsed, refetch every 5 min ---------- */
 
 function tick() {
   if (Math.floor(Date.now() / 30000) !== window.__lastTick) {
     window.__lastTick = Math.floor(Date.now() / 30000);
     render();
+  }
+  if (Math.floor(Date.now() / 300000) !== window.__lastFetchTick) {
+    window.__lastFetchTick = Math.floor(Date.now() / 300000);
+    fetchLaunches();   // silent refresh; falls back gracefully on failure
   }
 }
 
@@ -378,7 +604,7 @@ document.getElementById("toggle-adv").addEventListener("click", () => {
   if (!advDiv.classList.contains("hidden")) {
     document.getElementById("city").value = "custom";
     document.getElementById("lat").value = loc.lat.toFixed(4);
-    document.getElementById("lon").value = loc.lon.toFixed(4);
+    document.getElementById("lon").value  = loc.lon.toFixed(4);
   }
 });
 document.getElementById("geo").addEventListener("click", () => {
@@ -396,9 +622,14 @@ document.getElementById("geo").addEventListener("click", () => {
   );
 });
 document.getElementById("addcustom").addEventListener("click", addCustom);
+document.getElementById("stamp").addEventListener("click", stampNow);
+document.getElementById("submit-report").addEventListener("click", submitReport);
 
 loadLoc();
 render();
+renderSourceNote();
+fetchLaunches();
+window.__lastFetchTick = Math.floor(Date.now() / 300000);
 setInterval(tick, 1000);
 </script>
 </body>
