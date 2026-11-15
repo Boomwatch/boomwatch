@@ -160,7 +160,7 @@ async function upsertLaunch(db: D1Database, row: ReturnType<typeof toLaunchRow>)
        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
        ON CONFLICT(id) DO UPDATE SET
          provider=excluded.provider, vehicle=excluded.vehicle,
-         mission=excluded.mission, net_utc=excluded.net,
+         mission=excluded.mission, net_utc=excluded.net_utc,
          window_min=excluded.window_min,
          recovery_type=excluded.recovery_type,
          landing_site=excluded.landing_site,
@@ -196,7 +196,8 @@ async function upsertPrediction(db: D1Database, row: PredictionRow) {
 // ---------------------------------------------------------------------------
 
 export default {
-  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)   {
     const db = env.DB;
 
     // 1. Fetch candidate list (mode=list, broad search match)
