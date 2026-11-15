@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BoomWatch — Sonic Boom Window Calculator</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #1a1e2a; --border: #2c3244;
+    --text: #e4e7f0; --muted: #8b93a8; --accent: #6d4aff;
+    --good: #34c98e; --warn: #f5b04c; --dim: #565d72;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.5;
+    max-width: 760px; margin: 0 auto; padding: 1.5rem 1rem 4rem;
+  }
+  h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+  .sub { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; }
+  .panel { background: var(--panel); border: 1px solid var(--border);
+           border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 1.25rem; }
+  .panel h2 { font-size: 1rem; margin-bottom: 0.75rem; color: var(--accent); }
+  label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.25rem; }
+  input[type="number"], input[type="datetime-local"], input[type="text"], select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.5rem; width: 100%; font-size: 0.95rem;
+  }
+  .row { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: flex-end; }
+  .row > div { flex: 1; min-width: 140px; }
+  button {
+    background: var(--accent); color: #fff; border: none; border-radius: 6px;
+    padding: 0.55rem 1rem; font-size: 0.9rem; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.15); }
+  button.ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+  .launch-card { background: var(--bg); border: 1px solid var(--border);
+                 border-radius: 8px; padding: 0.9rem 1.1rem; margin-bottom: 0.9rem; }
+  .launch-head { display: flex; justify-content: space-between; align-items: baseline;
+                 flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.6rem; }
+  .launch-name { font-weight: 600; }
+  .badge { font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 10px;
+           border: 1px solid var(--border); color: var(--warn); }
+  .badge.rtls { color: var(--good); }
+  .net { color: var(--muted); font-size: 0.85rem; }
+  .status { font-size: 0.85rem; margin-bottom: 0.5rem; color: var(--muted); }
+  .status.live { color: var(--accent); font-weight: 600; }
+  .window { background: var(--panel); border: 1px solid var(--border);
+            border-radius: 6px; padding: 0.6rem 0.8rem; margin-bottom: 0.5rem; }
+  .window .tag { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em;
+                 color: var(--dim); }
+  .window .times { font-size: 0.95rem; font-weight: 600; margin: 0.1rem 0; }
+  .window .detail { font-size: 0.78rem; color: var(--muted); }
+  .window .detail b { color: var(--text); }
+  .window.cond { opacity: 0.75; border-style: dashed; }
+  .footnote { color: var(--dim); font-size: 0.75rem; margin-top: 0.75rem; }
+  code { background: var(--bg); padding: 0.1rem 0.3rem; border-radius: 4px; font-size: 0.85em; }
+  #clock { font-variant-numeric: tabular-nums; }
+  .adv-toggle { background: none; border: none; color: var(--dim); font-size: 0.75rem;
+                cursor: pointer; padding: 0.5rem 0 0; text-decoration: underline; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+
+<h1>BoomWatch — Boom Window Calculator</h1>
+<p class="sub">Predicted sonic boom arrival times at your location for Vandenberg SFB launches.</p>
+
+<div class="panel">
+  <h2>Your location</h2>
+  <div class="row">
+    <div>
+      <label for="city">City</label>
+      <select id="city">
+        <option value="ventura" selected>Ventura</option>
+        <option value="santabarbara">Santa Barbara</option>
+        <option value="oxnard">Oxnard</option>
+        <option value="camarillo">Camarillo</option>
+        <option value="custom">Custom coordinates…</option>
+      </select>
+    </div>
+    <div style="flex:0">
+      <button id="geo">Use GPS</button>
+    </div>
+  </div>
+  <div id="custom-loc" class="row hidden" style="margin-top:0.75rem">
+    <div>
+      <label for="lat">Latitude</label>
+      <input type="number" id="lat" step="0.0001" min="-90" max="90">
+    </div>
+    <div>
+      <label for="lon">Longitude</label>
+      <input type="number" id="lon" step="0.0001" min="-180" max="180">
+    </div>
+  </div>
+  <button id="toggle-adv" class="adv-toggle" type="button">Show custom coordinates</button>
+  <p class="footnote" id="loc-note"></p>
+</div>
+
+<div class="panel">
+  <h2>Upcoming launches</h2>
+  <div id="launches"></div>
+  <p class="footnote" id="stale-note">
+    ⚠ Embedded schedule — verify against a live source (spacelaunchschedule.com or
+    SpaceX) before planning an observation. Recovery type is <code>unknown</code>
+    for these missions until confirmed; descent windows show only if RTLS occurs.
+  </p>
+</div>
+
+<div class="panel">
+  <h2>Custom launch</h2>
+  <p class="sub" style="margin-bottom:0.75rem">Run any liftoff time through the model — useful for
+     webcast T+0 that differs from the published NET, or launch scrubs/rescheduling.</p>
+  <div class="row">
+    <div>
+      <label for="cname">Name</label>
+      <input type="text" id="cname" placeholder="e.g. USSF-317 (webcast T0)">
+    </div>
+    <div>
+      <label for="cnet">Liftoff (local time)</label>
+      <input type="datetime-local" id="cnet">
+    </div>
+    <div style="flex:0">
+      <button id="addcustom">Calculate</button>
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Model notes</h2>
+  <p class="footnote" style="font-size:0.8rem; color:var(--muted)">
+    Surface sound speed 343 m/s. Ascent boom sourced at SLC-4E (v0 approximation of the
+    sweeping boom carpet). Descent boom sourced at LZ-4, conditioned on an RTLS recovery,
+    which is unconfirmed for these missions. Windows include profile slack
+    (ascent −60/+180 s, descent −120/+240 s around Mach crossover) plus propagation delay
+    from source to your location. Atmospheric refraction and winds can shift arrival by
+    tens of seconds — treat windows as expectations, not appointments.
+    Calibration anchor: Ventura, 133 km from LZ-4, observed boom ≈ T+8 min.
+  </p>
+</div>
+
+<script>
+"use strict";
+
+/* ============================================================
+   CONSTANTS — canonical source is shared/sites.ts (TypeScript).
+   Browsers can't import TS, so this is a plain-JS mirror.
+   KEEP IN SYNC with shared/sites.ts when profiles change.
+   ============================================================ */
+const SOUND_MPS   = 343;                    // m/s, surface sound speed
+const PAD_SLC4E   = { lat: 34.632, lon: -120.611 };  // ascent boom source (v0)
+const LZ4         = { lat: 34.633, lon: -120.615 };  // descent boom source
+const ASCENT = { crossover: 60,  pre: 60,  post: 180 }; // T+ seconds, profile f9_rtls_ascent
+const DESCENT= { crossover: 600, pre: 120, post: 240 }; // T+ seconds, profile f9_rtls_descent
+
+/* Preset locations — approximate city centers */
+const CITIES = {
+  santabarbara: { name: "Santa Barbara", lat: 34.4208, lon: -119.6983 },
+  ventura:      { name: "Ventura",       lat: 34.2750, lon: -119.2320 },
+  oxnard:       { name: "Oxnard",        lat: 34.1975, lon: -119.1771 },
+  camarillo:    { name: "Camarillo",     lat: 34.2164, lon: -119.0373 }
+};
+
+/* Embedded launch list — MANUALLY SYNCED until the api worker exists.
+   Update from: wrangler d1 execute boomwatch-db --remote \
+     --command "SELECT mission, net_utc, recovery_type FROM launches ORDER BY net_utc"
+   Verify dates against a live schedule (lldev data is stale). */
+const LAUNCHES = [
+  { name: "USSF-317",  net: "2026-11-18T03:14:00Z", rtls: false },
+  { name: "USSF-266",  net: "2026-11-18T16:49:00Z", rtls: false },
+  { name: "NROL-136",  net: "2026-11-21T12:30:00Z", rtls: false },
+  { name: "NROL-195",  net: "2026-11-30T00:00:00Z", rtls: false },
+  { name: "OneWeb 21", net: "2026-11-30T00:00:00Z", rtls: false },
+  { name: "Starlink Group 15-21", net: "2026-11-30T00:00:00Z", rtls: false },
+];
+
+/* ---------- geometry & model (mirror of shared/sites.ts) ---------- */
+
+function haversineMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000; // Earth radius, m
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat/2)**2 +
+            Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+// Returns the audible window at the observer, in T+ seconds:
+// [crossover - pre + propDelay,  crossover + post + propDelay]
+function boomWindow(profile, src, obsLat, obsLon) {
+  const distM = haversineMeters(src.lat, src.lon, obsLat, obsLon);
+  const propDelay = distM / SOUND_MPS;
+  return {
+    start: profile.crossover - profile.pre  + propDelay,
+    end:   profile.crossover + profile.post + propDelay,
+    propDelay,
+    distKm: distM / 1000
+  };
+}
+
+/* ---------- formatting helpers ---------- */
+
+const fmtTplus = s => {
+  if (s < 0) return "T−" + fmtDur(-s);
+  return "T+" + fmtDur(s);
+};
+const fmtDur = s => {
+  s = Math.round(s);
+  const m = Math.floor(s / 60), sec = s % 60;
+  return `${m}:${String(sec).padStart(2, "0")}`;
+};
+const fmtLocal = (netIso, offsetSec) =>
+  new Date(new Date(netIso).getTime() + offsetSec * 1000)
+    .toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+const fmtNetLocal = netIso =>
+  new Date(netIso).toLocaleString([], {
+    weekday: "short", month: "short", day: "numeric",
+    hour: "numeric", minute: "2-digit"
+  });
+
+/* ---------- location handling ---------- */
+
+const LS_KEY = "boomwatch.location";
+let loc = { lat: CITIES.ventura.lat, lon: CITIES.ventura.lon };  // default: Ventura
+let locLabel = "Ventura, CA";  // for display
+
+function saveLoc() {
+  const lat = parseFloat(document.getElementById("lat").value);
+  const lon = parseFloat(document.getElementById("lon").value);
+  if (Number.isFinite(lat) && Number.isFinite(lon) &&
+      Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+    loc = { lat, lon };
+    locLabel = `custom (${lat.toFixed(4)}, ${lon.toFixed(4)})`;
+    localStorage.setItem(LS_KEY, JSON.stringify(loc));
+    render();
+  }
+}
+
+function setCity(key) {
+  const advDiv = document.getElementById("custom-loc");
+  const toggleBtn = document.getElementById("toggle-adv");
+  if (key === "custom") {
+    // reveal fields; wait for manual entry
+    advDiv.classList.remove("hidden");
+    toggleBtn.textContent = "Hide custom coordinates";
+    document.getElementById("lat").focus();
+    return;
+  }
+  const c = CITIES[key];
+  if (!c) return;
+  loc = { lat: c.lat, lon: c.lon };
+  locLabel = c.name;
+  localStorage.setItem(LS_KEY, JSON.stringify(loc));
+  document.getElementById("lat").value = c.lat.toFixed(4);
+  document.getElementById("lon").value  = c.lon.toFixed(4);
+  advDiv.classList.add("hidden");
+  toggleBtn.textContent = "Show custom coordinates";
+  render();
+}
+
+function isCityMatch(key) {
+  const c = CITIES[key];
+  return c && Math.abs(loc.lat - c.lat) < 0.001 && Math.abs(loc.lon - c.lon) < 0.001;
+}
+
+function loadLoc() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LS_KEY));
+    if (saved && Number.isFinite(saved.lat)) loc = saved;
+  } catch (e) { /* fresh start */ }
+  // Sync UI to whatever's active: a matching city, or custom mode
+  const sel = document.getElementById("city");
+  const key = Object.keys(CITIES).find(isCityMatch);
+  if (key) {
+    sel.value = key;
+    setCity(key);
+  } else {
+    sel.value = "custom";
+    document.getElementById("custom-loc").classList.remove("hidden");
+    document.getElementById("toggle-adv").textContent = "Hide custom coordinates";
+    document.getElementById("lat").value = loc.lat.toFixed(4);
+    document.getElementById("lon").value = loc.lon.toFixed(4);
+    locLabel = `custom (${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)})`;
+  }
+}
+
+/* ---------- rendering ---------- */
+
+function windowHtml(tag, w, netIso, cond) {
+  return `
+    <div class="window${cond ? " cond" : ""}">
+      <div class="tag">${tag}</div>
+      <div class="times">${fmtTplus(w.start)} → ${fmtTplus(w.end)}
+        &nbsp;(≈ ${fmtLocal(netIso, w.start)}–${fmtLocal(netIso, w.end)} local)</div>
+      <div class="detail">${w.distKm.toFixed(0)} km from source ·
+        sound travel <b>${fmtDur(w.propDelay)}</b></div>
+    </div>`;
+}
+
+function launchCard(l) {
+  const ascentW  = boomWindow(ASCENT,  PAD_SLC4E, loc.lat, loc.lon);
+  const descentW = boomWindow(DESCENT, LZ4,       loc.lat, loc.lon);
+  const netMs = new Date(l.net).getTime();
+  const tplusSec = (Date.now() - netMs) / 1000;
+
+  // Live status line
+  let status;
+  if (tplusSec < 0) {
+    status = `Liftoff in <span id="clock">${fmtDur(-tplusSec)}</span>`;
+  } else if (tplusSec < ascentW.end + 120) {
+    status = `<span class="status live">IN FLIGHT — elapsed ${fmtTplus(tplusSec)}</span>`;
+  } else {
+    status = `Launched ${fmtTplus(tplusSec)} ago`;
+  }
+
+  const badge = l.rtls
+    ? `<span class="badge rtls">RTLS expected</span>`
+    : `<span class="badge">recovery unknown</span>`;
+
+  return `
+    <div class="launch-card">
+      <div class="launch-head">
+        <span class="launch-name">${l.name}</span>
+        <span>${badge}</span>
+      </div>
+      <div class="net">NET: ${fmtNetLocal(l.net)}</div>
+      <div class="status" style="margin-top:0.4rem">${status}</div>
+      ${windowHtml("Ascent boom (expected)", ascentW, l.net, false)}
+      ${windowHtml("Descent boom (only if RTLS — unconfirmed)", descentW, l.net, true)}
+    </div>`;
+}
+
+function render() {
+  const container = document.getElementById("launches");
+  container.innerHTML = LAUNCHES.map(launchCard).join("");
+  document.getElementById("loc-note").textContent =
+    `Observer: ${locLabel} · ${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}`;
+}
+
+/* ---------- custom launch ---------- */
+
+function addCustom() {
+  const nameEl = document.getElementById("cname");
+  const netEl  = document.getElementById("cnet");
+  if (!netEl.value) { alert("Enter a liftoff time."); return; }
+  const iso = new Date(netEl.value).toISOString();
+  const name = nameEl.value.trim() || "Custom launch";
+  LAUNCHES.unshift({ name, net: iso, rtls: false });
+  render();
+  nameEl.value = ""; netEl.value = "";
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+/* ---------- live ticker: refresh countdown/elapsed periodically ---------- */
+
+function tick() {
+  if (Math.floor(Date.now() / 30000) !== window.__lastTick) {
+    window.__lastTick = Math.floor(Date.now() / 30000);
+    render();
+  }
+}
+
+/* ---------- wire up ---------- */
+
+document.getElementById("city").addEventListener("change", e => setCity(e.target.value));
+document.getElementById("lat").addEventListener("change", saveLoc);
+document.getElementById("lon").addEventListener("change", saveLoc);
+document.getElementById("toggle-adv").addEventListener("click", () => {
+  const advDiv = document.getElementById("custom-loc");
+  const btn = document.getElementById("toggle-adv");
+  advDiv.classList.toggle("hidden");
+  btn.textContent = advDiv.classList.contains("hidden")
+    ? "Show custom coordinates" : "Hide custom coordinates";
+  if (!advDiv.classList.contains("hidden")) {
+    document.getElementById("city").value = "custom";
+    document.getElementById("lat").value = loc.lat.toFixed(4);
+    document.getElementById("lon").value = loc.lon.toFixed(4);
+  }
+});
+document.getElementById("geo").addEventListener("click", () => {
+  if (!navigator.geolocation) { alert("Geolocation not available in this browser."); return; }
+  navigator.geolocation.getCurrentPosition(
+    p => {
+      document.getElementById("city").value = "custom";
+      document.getElementById("custom-loc").classList.remove("hidden");
+      document.getElementById("toggle-adv").textContent = "Hide custom coordinates";
+      document.getElementById("lat").value = p.coords.latitude.toFixed(4);
+      document.getElementById("lon").value  = p.coords.longitude.toFixed(4);
+      saveLoc();
+    },
+    () => alert("Location denied or unavailable — enter coordinates manually.")
+  );
+});
+document.getElementById("addcustom").addEventListener("click", addCustom);
+
+loadLoc();
+render();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>
