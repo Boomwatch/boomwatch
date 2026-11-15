@@ -50,6 +50,7 @@
   .window .tag { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em;
                  color: var(--dim); }
   .window .times { font-size: 0.95rem; font-weight: 600; margin: 0.1rem 0; }
+  .window .peak { color: var(--accent); }
   .window .detail { font-size: 0.78rem; color: var(--muted); }
   .window .detail b { color: var(--text); }
   .window.cond { opacity: 0.75; border-style: dashed; }
@@ -131,11 +132,11 @@
   <p class="footnote" style="font-size:0.8rem; color:var(--muted)">
     Surface sound speed 343 m/s. Ascent boom sourced at SLC-4E (v0 approximation of the
     sweeping boom carpet). Descent boom sourced at LZ-4, conditioned on an RTLS recovery,
-    which is unconfirmed for these missions. Windows include profile slack
-    (ascent −60/+180 s, descent −120/+240 s around Mach crossover) plus propagation delay
-    from source to your location. Atmospheric refraction and winds can shift arrival by
-    tens of seconds — treat windows as expectations, not appointments.
-    Calibration anchor: Ventura, 133 km from LZ-4, observed boom ≈ T+8 min.
+    which is unconfirmed for these missions. Each window spans profile slack
+    (ascent −60/+180 s, descent −120/+240 s around Mach crossover) plus propagation delay;
+    the peak is crossover + propagation — the most likely arrival. Atmospheric refraction
+    and winds can shift arrival by tens of seconds — treat windows as expectations,
+    not appointments. Calibration anchor: Ventura, 133 km from LZ-4, observed boom ≈ T+8 min.
   </p>
 </div>
 
@@ -185,14 +186,16 @@ function haversineMeters(lat1, lon1, lat2, lon2) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-// Returns the audible window at the observer, in T+ seconds:
-// [crossover - pre + propDelay,  crossover + post + propDelay]
+// Returns the audible window at the observer, in T+ seconds.
+// start/end include profile slack; peak = crossover + propagation
+// (physically centered expectation — the most likely arrival).
 function boomWindow(profile, src, obsLat, obsLon) {
   const distM = haversineMeters(src.lat, src.lon, obsLat, obsLon);
   const propDelay = distM / SOUND_MPS;
   return {
     start: profile.crossover - profile.pre  + propDelay,
     end:   profile.crossover + profile.post + propDelay,
+    peak:  profile.crossover + propDelay,
     propDelay,
     distKm: distM / 1000
   };
@@ -290,8 +293,9 @@ function windowHtml(tag, w, netIso, cond) {
   return `
     <div class="window${cond ? " cond" : ""}">
       <div class="tag">${tag}</div>
-      <div class="times">${fmtTplus(w.start)} → ${fmtTplus(w.end)}
-        &nbsp;(≈ ${fmtLocal(netIso, w.start)}–${fmtLocal(netIso, w.end)} local)</div>
+      <div class="times">${fmtTplus(w.start)} → ${fmtTplus(w.end)} ·
+        <span class="peak">peak ≈ ${fmtTplus(w.peak)}
+        (${fmtLocal(netIso, w.peak)} local)</span></div>
       <div class="detail">${w.distKm.toFixed(0)} km from source ·
         sound travel <b>${fmtDur(w.propDelay)}</b></div>
     </div>`;
