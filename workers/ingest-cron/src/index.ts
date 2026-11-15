@@ -206,12 +206,16 @@ export default {
 
     // 2. Cut to the lookahead window
     const cutoff = Date.now() + LOOKAHEAD_DAYS * 86400 * 1000;
-    const inWindow = candidates.filter((l) =>
-      Date.parse(l.net) <= cutoff && isVandenberg(l) === true ||
-      // list-mode pad is a string; fall back to name check
-      (typeof (l as any).pad === "string" &&
-       (l as any).pad === "Space Launch Complex 4E"),
-    );
+    const inWindow = candidates.filter((l) => {
+    // Date gate applies to everything — no exceptions
+    const t = Date.parse(l.net);
+    if (!Number.isFinite(t) || t > cutoff) return false;
+
+    // Vandenberg check: pad ID (full mode) or pad name (list mode)
+    if (isVandenberg(l) === true) return true;
+    if (typeof (l as any).pad === "string" && (l as any).pad === "Space Launch Complex 4E") return true;
+    return false;
+    });
 
     // 3. For each, fetch full mode to get pad.id (reliable filter + archive)
     const processed: string[] = [];
