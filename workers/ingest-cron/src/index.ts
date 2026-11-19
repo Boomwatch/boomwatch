@@ -12,8 +12,9 @@ const ASCENT = PROFILES["f9_rtls_ascent"];
 const DESCENT = PROFILES["f9_rtls_descent"];
 
 // Use lldev (stale, unthrottled) in development; ll (live, 15 req/hr) in prod.
+// Chaged to ll because of stale data during, but limiting requests to less than 15 /hr
 // Override at deploy time: `--var` or wrangler.toml [vars].
-const API_BASE = "https://lldev.thespacedevs.com";
+const API_BASE = "https://ll.thespacedevs.com";
 
 // How far ahead to ingest.
 const LOOKAHEAD_DAYS = 14;
@@ -34,7 +35,7 @@ async function fetchUpcomingVandenberg(): Promise<LL2Launch[]> {
   for (let page = 0; page < MAX_PAGES; page++) {
     const url =
       `${API_BASE}/2.2.0/launch/upcoming/?mode=list&limit=${PAGE_LIMIT}` +
-      `&offset=${page * PAGE_LIMIT}&search=Vandenberg`;
+      `&offset=${page * PAGE_LIMIT}&search=Vandenberg&pad__ids=${SITE.ll2PadId}`
     const res = await fetch(url);
     if (!res.ok) {
       throw new Error(`LL2 ${res.status} on page ${page}`);
@@ -61,6 +62,19 @@ async function fetchFullLaunch(id: string): Promise<LL2Launch | null> {
   return (await res.json()) as LL2Launch;
 }
 
+// --- throttle telemetry (diagnostic; safe to remove once characterized) ---
+async function readThrottle(): Promise<string> {
+  try {
+    const res = await fetch(`${API_BASE}/2.2.0/api-throttle/`);
+    if (!res.ok) return `throttle endpoint ${res.status}`;
+    const t = (await res.json()) as { ident?: string; current_use?: number };
+    return `ident=${t.ident} current_use=${t.current_use}`;
+  } catch (e) {
+    return `throttle read failed: ${String(e)}`;
+  }
+}
+
+
 // ---------------------------------------------------------------------------
 // Mapping / resolution
 // ---------------------------------------------------------------------------
@@ -85,7 +99,7 @@ function toLaunchRow(l: LL2Launch): {
     : null;
 
   // LL2 sparse-landing heuristic: national-security missions often carry
-  // no landing info. Do not guess RTLS — default to unknown.
+  // no landing info. Do not guess RTLS - default to unknown.
   const recoveryType = "unknown" as const;
   const landingSite = null as string | null;
 
@@ -200,6 +214,9 @@ export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)   {
     const db = env.DB;
 
+    // Read the API throttle
+    console.log("throttle@start:", await readThrottle());
+
     // 1. Fetch candidate list (mode=list, broad search match)
     const candidates = await fetchUpcomingVandenberg();
     console.log(`LL2 search returned ${candidates.length} candidate launches`);
@@ -207,7 +224,7 @@ export default {
     // 2. Cut to the lookahead window
     const cutoff = Date.now() + LOOKAHEAD_DAYS * 86400 * 1000;
     const inWindow = candidates.filter((l) => {
-    // Date gate applies to everything — no exceptions
+    // Date gate applies to everything - no exceptions
     const t = Date.parse(l.net);
     if (!Number.isFinite(t) || t > cutoff) return false;
 
@@ -226,7 +243,7 @@ export default {
       const row = toLaunchRow(full);
       await upsertLaunch(db, row);
 
-      // recovery_type unknown for now — RTLS confirmation is manual/cross-
+      // recovery_type unknown for now - RTLS confirmation is manual/cross-
       // source (deferred to Batch 3's enhancement or manual admin action).
       const preds = buildPredictions(row.id, /* isRTLS */ false);
       for (const p of preds) {
@@ -237,5 +254,6 @@ export default {
 
     console.log(`Ingested ${processed.length} Vandenberg launches:`);
     console.log(processed.join("\n"));
+    console.log("throttle@end:", await readThrottle());
   },
 };
