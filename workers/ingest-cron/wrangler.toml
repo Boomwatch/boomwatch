@@ -9,3 +9,8 @@ crons = ["13 0 * * *", "7 3 * * *", "59 4 * * *", "19 6 * * *", "13 18 * * *"]
 binding = "DB"
 database_name = "boomwatch-db"
 database_id = "49a99423-9462-440a-8400-46722e1dc357"
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+head_sampling_rate = 1
