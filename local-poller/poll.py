@@ -269,12 +269,16 @@ def throttle_report():
     except Exception as e:
         print(f"throttle check skipped ({e})")
 
+def stamp(label):
+    print(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] {label}")
+
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
+    stamp("=== run start ===")
     throttle_report()
     ap = argparse.ArgumentParser(description="BoomWatch LL2 poller")
     ap.add_argument("--dry-run", action="store_true",
@@ -318,6 +322,7 @@ def main():
             predictions.extend(build_predictions(row["id"], is_rtls=False))
     except urllib.error.HTTPError as e:
         if e.code == 429:
+            stamp("run aborted: LL2 rate-limited (429) mid-run - nothing pushed")
             sys.exit("LL2 rate-limited (429) mid-run — nothing pushed; "
                     "wait for the hourly window and rerun")
         raise
@@ -329,6 +334,7 @@ def main():
         print(json.dumps({"launches": launches,
                           "predictions": predictions}, indent=2))
         throttle_report()
+        stamp("=== run end ===")
         return
 
     token = token_file.read_text().strip()
@@ -350,8 +356,10 @@ def main():
             result = json.loads(resp.read().decode())
             print(f"Push OK: {result}")
             throttle_report()
+            stamp('=== run end ===')
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
+        stamp(f"=== run end (push FAILED: HTTP {e.code}) ===")
         sys.exit(f"Push FAILED: HTTP {e.code}: {body}")
 
 
