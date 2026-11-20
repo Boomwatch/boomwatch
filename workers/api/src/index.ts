@@ -17,10 +17,10 @@
 
 export interface Env {
   DB: D1Database;
+  ADMIN_TOKEN: string;   // set via: wrangler secret put ADMIN_TOKEN
 }
 
 const HEARD_VALUES = new Set(["yes", "no", "unsure"]);
-/* const NOTE_MAX = 280; should be deleted
 
 /* ---------------------- CORS ---------------------- */
 
@@ -85,6 +85,17 @@ async function getLaunchDetail(env: Env, id: string, origin: string | null): Pro
   ).bind(id).all();
 
   return json(200, { ok: true, launch, predictions: preds ?? [] }, origin);
+}
+
+interface IngestLaunchRow {
+  id: string; site_id: string; provider: string; vehicle: string;
+  mission: string; net_utc: string; window_min: number | null;
+  recovery_type: string; landing_site: string | null; raw_json: string;
+}
+interface PredictionRow {
+  launch_id: string; boom_seq: number; profile_id: string;
+  crossover_s: number; prop_delay_s: number | null;
+  confidence: number; model_version: string;
 }
 
 interface ReportBody {
@@ -161,6 +172,23 @@ async function postReport(env: Env, body: ReportBody, origin: string | null): Pr
   }, origin);
 }
 
+async function requireAdmin(request: Request, env: Env, origin: string | null): Promise<Response | null> {
+  const auth = request.headers.get("Authorization") ?? "";
+  const m = /^Bearer (.+)$/.exec(auth);
+  if (!m) return badRequest("missing bearer token", origin);
+  const [a, b] = await Promise.all([
+    crypto.subtle.digest("SHA-256", new TextEncoder().encode(m[1])),
+    crypto.subtle.digest("SHA-256", new TextEncoder().encode(env.ADMIN_TOKEN)),
+  ]);
+  // Compare digests byte-for-byte; digest equality implies token equality.
+  const da = new Uint8Array(a), db = new Uint8Array(b);
+  if (da.length !== db.length) return badRequest("bad token", origin);
+  let ok = true;
+  for (let i = 0; i < da.length; i++) if (da[i] !== db[i]) ok = false;
+  if (!ok) return badRequest("bad token", origin);
+  return null; // authorized
+}
+
 /* ---------------------- router ---------------------- */
 
 export default {
@@ -192,6 +220,119 @@ export default {
         return badRequest("body must be a JSON object", origin);
       return postReport(env, body as ReportBody, origin);
     }
+
+
+    // POST /admin/ingest — authenticated bulk upsert of pre-transformed rows.
+    // CONTRACT: accepts exactly the canonical launch/prediction row shapes and
+    // nothing else. This contract is frozen on purpose — future remote ingest
+    // (worker-side fetch+transform) will POST to this same route, so D1 write
+    // SQL lives here and only here regardless of where the fetch runs.
+    if (request.method === "POST" && path === "/admin/ingest") {
+      const denied = await requireAdmin(request, env, origin);
+      if (denied) return denied;
+
+      let body: { launches: IngestLaunchRow[]; predictions: PredictionRow[] };
+      try {
+        body = await request.json();
+      } catch {
+        return badRequest("invalid JSON body", origin);
+      }
+
+      // ---- Shape validation: strict before any DB touch (house style) ----
+      if (!body || typeof body !== "object" ||
+          !Array.isArray(body.launches) || !Array.isArray(body.predictions)) {
+        return badRequest("body must be {launches:[], predictions:[]}", origin);
+      }
+      if (body.launches.length === 0 && body.predictions.length === 0) {
+        return json(200, { ok: true, ingested: 0, note: "nothing to write" }, origin);
+      }
+
+      const LAUNCH_FIELDS = ["id","site_id","provider","vehicle","mission",
+        "net_utc","window_min","recovery_type","landing_site","raw_json"];
+      for (const l of body.launches) {
+        if (typeof l !== "object" || l === null) return badRequest("launch row not an object", origin);
+        for (const f of LAUNCH_FIELDS) {
+          if (!(f in l)) return badRequest(`launch row missing field: ${f}`, origin);
+        }
+        if (typeof l.id !== "string" || l.id.length === 0 || l.id.length > 64)
+          return badRequest("launch id must be a string, 1-64 chars", origin);
+        if (typeof l.site_id !== "string") return badRequest("site_id must be a string", origin);
+        if (typeof l.provider !== "string" || typeof l.vehicle !== "string" ||
+            typeof l.mission !== "string")
+          return badRequest("provider/vehicle/mission must be strings", origin);
+        if (typeof l.net_utc !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(l.net_utc))
+          return badRequest("net_utc must be ISO 8601", origin);
+        if (l.window_min !== null && !Number.isInteger(l.window_min))
+          return badRequest("window_min must be integer or null", origin);
+        if (!["rtls","droneship","expendable","catch","unknown"].includes(l.recovery_type))
+          return badRequest("recovery_type invalid", origin);
+        if (typeof l.raw_json !== "string") return badRequest("raw_json must be a string", origin);
+      }
+
+      const PRED_FIELDS = ["launch_id","boom_seq","profile_id","crossover_s",
+        "prop_delay_s","confidence","model_version"];
+      const payloadIds = new Set(body.launches.map((l: IngestLaunchRow) => l.id));
+      for (const p of body.predictions) {
+        if (typeof p !== "object" || p === null) return badRequest("prediction row not an object", origin);
+        for (const f of PRED_FIELDS) {
+          if (!(f in p)) return badRequest(`prediction row missing field: ${f}`, origin);
+        }
+        if (!payloadIds.has(p.launch_id) &&
+            !(await env.DB.prepare("SELECT 1 FROM launches WHERE id = ?").bind(p.launch_id).first())) {
+          return badRequest(`prediction references unknown launch: ${p.launch_id}`, origin);
+        }
+        if (![1,2,3].includes(p.boom_seq)) return badRequest("boom_seq must be 1-3", origin);
+        if (typeof p.profile_id !== "string") return badRequest("profile_id must be a string", origin);
+        if (typeof p.crossover_s !== "number" || typeof p.confidence !== "number")
+          return badRequest("crossover_s/confidence must be numbers", origin);
+        if (typeof p.model_version !== "string") return badRequest("model_version must be a string", origin);
+      }
+
+      // ---- Upserts: canonical SQL. ingest-cron's copy is retired when its
+      // trigger is disabled; if remote ingest is ever rebuilt, it should POST
+      // here rather than duplicate this SQL again. ----
+      const upsertLaunch = `
+        INSERT INTO launches
+          (id, site_id, provider, vehicle, mission, net_utc, window_min,
+          recovery_type, landing_site, raw_json)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+        ON CONFLICT(id) DO UPDATE SET
+          provider=excluded.provider, vehicle=excluded.vehicle,
+          mission=excluded.mission, net_utc=excluded.net_utc,
+          window_min=excluded.window_min, recovery_type=excluded.recovery_type,
+          landing_site=excluded.landing_site, raw_json=excluded.raw_json`;
+
+      const upsertPrediction = `
+        INSERT INTO predictions
+          (launch_id, boom_seq, profile_id, crossover_s, prop_delay_s,
+          confidence, model_version)
+        VALUES (?1,?2,?3,?4,?5,?6,?7)
+        ON CONFLICT(launch_id, boom_seq) DO UPDATE SET
+          profile_id=excluded.profile_id, crossover_s=excluded.crossover_s,
+          prop_delay_s=excluded.prop_delay_s, confidence=excluded.confidence,
+          model_version=excluded.model_version`;
+
+      // Launches first (FK parents), then predictions.
+      for (const l of body.launches) {
+        await env.DB.prepare(upsertLaunch)
+          .bind(l.id, l.site_id, l.provider, l.vehicle, l.mission,
+                l.net_utc, l.window_min, l.recovery_type, l.landing_site, l.raw_json)
+          .run();
+      }
+      for (const p of body.predictions) {
+        await env.DB.prepare(upsertPrediction)
+          .bind(p.launch_id, p.boom_seq, p.profile_id, p.crossover_s,
+                p.prop_delay_s, p.confidence, p.model_version)
+          .run();
+      }
+
+      return json(200, {
+        ok: true,
+        ingested: body.launches.length,
+        predictions_written: body.predictions.length,
+      }, origin);
+    }
+
 
     return json(404, { ok: false, error: "no such route" }, origin);
   },

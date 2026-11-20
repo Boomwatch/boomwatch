@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.boomwatch.poller</string>
+
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key><integer>0</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Hour</key><integer>6</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Hour</key><integer>12</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Hour</key><integer>18</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+    </array>
+
+    <!-- If the Mac was asleep at fire time, run once on wake. -->
+    <key>StartCalendarIntervalDelay</key>
+    <true/>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>python3</string>
+        <string>/Users/billy/boomwatch/local-poller/poll.py</string>
+    </array>
+
+    <!-- Environment consumed by poll.py.
+         FUTURE KEYS (add when adopted): BW_LL2_VERSION=2.3.0; BW_LL2_KEY=<key>.
+         BW_API_URL not strictly needed (code default is correct) but kept explicit. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>BW_LL2_BASE</key>
+        <string>https://ll.thespacedevs.com</string>
+        <key>BW_API_URL</key>
+        <string>https://boomwatch-api.cloudflare-sporty919.workers.dev/admin/ingest</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/boomwatch-poller.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/boomwatch-poller.err.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
