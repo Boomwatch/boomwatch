@@ -109,6 +109,9 @@
 <div class="panel">
   <h2>Upcoming launches</h2>
   <div id="launches"></div>
+  <h2 style="margin-top:1.2rem">Recent launches</h2>
+  <p class="footnote">Past launches are kept for the calibration record — reports stay open.</p>
+  <div id="recent-launches"></div>
   <p class="footnote" id="source-note"></p>
 </div>
 
@@ -117,7 +120,15 @@
   <p class="sub" style="margin-bottom:0.75rem">Tell the model what you heard (or didn't).
      Reports feed the Bayesian verdict engine. Your current location
      (<span id="report-loc">—</span>) is attached automatically.</p>
-  <div class="row">
+
+  <!-- STAMP FIRST: biggest control on the page -->
+  <button id="stamp" type="button"
+          style="width:100%;padding:0.9rem;font-size:1.15rem;font-weight:600;margin-bottom:0.4rem">
+    STAMP — press the moment you hear it
+  </button>
+  <div id="stamp-display"></div>
+
+  <div class="row" style="margin-top:0.75rem">
     <div>
       <label for="report-launch">Launch</label>
       <select id="report-launch"><option value="">— loading —</option></select>
@@ -133,7 +144,7 @@
   </div>
   <div class="row" style="margin-top:0.75rem">
     <div>
-      <label for="magnitude">Loudness (1–5)</label>
+      <label for="magnitude">Loudness (1–5, optional)</label>
       <select id="magnitude">
         <option value="" selected>— skipped —</option>
         <option value="1">1 · barely felt</option>
@@ -151,17 +162,12 @@
         <option value="3">3rd boom</option>
       </select>
     </div>
-    <div style="flex:0">
-      <label>&nbsp;</label>
-      <button id="stamp" class="ghost" type="button">Stamp time NOW</button>
-    </div>
   </div>
-  <div id="stamp-display"></div>
   <button id="submit-report" type="button" style="margin-top:0.75rem">Submit report</button>
   <div id="report-msg"></div>
-  <p class="footnote">Timestamp the moment you hear it, then finish the form at leisure —
-     the stamp is the wall-clock datum the model calibrates against. Note: filing requires
-     the page to be served over http(s) (localhost or pages.dev), not opened as a file.</p>
+  <p class="footnote">The stamp is the wall-clock datum the model calibrates against —
+     stamp first, finish the rest at leisure. Loudness is optional; skipping it keeps
+     your timing sharp. Filing requires the page served over http(s), not file://.</p>
 </div>
 
 <div class="panel">
@@ -296,6 +302,14 @@ function normalizeApiRows(rows) {
   return [...map.values()].sort((a, b) => a.net.localeCompare(b.net));
 }
 
+const LS_NET_HISTORY = "boomwatch.netHistory";   // { launchId: netISO }
+
+function loadNetHistory() {
+  try { return JSON.parse(localStorage.getItem(LS_NET_HISTORY)) || {}; }
+  catch (e) { return {}; }
+}
+
+
 async function fetchLaunches() {
   try {
     const r = await fetch(API_BASE + "/launches");
@@ -303,7 +317,19 @@ async function fetchLaunches() {
     const body = await r.json();
     if (!body.ok || !Array.isArray(body.launches) || body.launches.length === 0)
       throw new Error("empty or malformed payload");
-    launchData = normalizeApiRows(body.launches);
+    const fresh = normalizeApiRows(body.launches);
+    const prev = (dataSource === "live") ? loadNetHistory() : {};
+    // Diff NETs: flag launches whose scheduled time moved since last live fetch
+    for (const l of fresh) {
+      if (l.id && prev[l.id] && prev[l.id] !== l.net) {
+        l.netChanged = { from: prev[l.id], to: l.net };
+      }
+    }
+    // Persist this fetch's NETs as the new baseline
+    const hist = {};
+    for (const l of fresh) if (l.id) hist[l.id] = l.net;
+    localStorage.setItem(LS_NET_HISTORY, JSON.stringify(hist));
+    launchData = fresh;
     dataSource = "live";
     fetchedAt = new Date();
   } catch (e) {
@@ -337,11 +363,29 @@ const fmtTplus = s => {
   if (s < 0) return "T−" + fmtDur(-s);
   return "T+" + fmtDur(s);
 };
+/* Old Format Date helper
 const fmtDur = s => {
   s = Math.round(s);
   const m = Math.floor(s / 60), sec = s % 60;
   return `${m}:${String(sec).padStart(2, "0")}`;
 };
+*/
+
+const fmtDur = s => {
+  s = Math.round(s);
+  if (s >= 86400) {
+    const d = Math.floor(s / 86400);
+    return `${d}d ` + fmtDur(s - d * 86400);   // "3d 4:12:33"
+  }
+  if (s >= 3600) {
+    const h = Math.floor(s / 3600), rem = s - h * 3600;
+    const m = Math.floor(rem / 60), sec = rem % 60;
+    return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  }
+  const m = Math.floor(s / 60), sec = s % 60;
+  return `${m}:${String(sec).padStart(2, "0")}`;
+};
+
 const fmtLocal = (netIso, offsetSec) =>
   new Date(new Date(netIso).getTime() + offsetSec * 1000)
     .toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
@@ -352,7 +396,6 @@ const fmtNetLocal = netIso =>
   });
 
 /* ---------- location handling ---------- */
-
 const LS_KEY = "boomwatch.location";
 let loc = { lat: CITIES.ventura.lat, lon: CITIES.ventura.lon };  // default: Ventura
 let locLabel = "Ventura, CA";  // for display
@@ -466,6 +509,10 @@ function launchCard(l) {
       ? `<span class="badge">recovery unknown · P≈${Math.round(ascConf * 100)}%</span>`
       : `<span class="badge">recovery unknown</span>`;
 
+  const schedBadge = l.netChanged
+    ? `<span class="badge" style="color:var(--accent);border-color:var(--accent)">⚠ NET changed — was ${fmtNetLocal(l.netChanged.from)}</span>`
+    : "";
+
   return `
     <div class="launch-card">
       <div class="launch-head">
@@ -473,12 +520,14 @@ function launchCard(l) {
         <span>${badge}</span>
       </div>
       <div class="net">NET: ${fmtNetLocal(l.net)}</div>
+      ${schedBadge ? `<div class="net">${schedBadge}</div>` : ""}
       <div class="status" style="margin-top:0.4rem">${status}</div>
       ${windowHtml("Ascent boom (expected)", ascentW, l.net, false, ascConf)}
       ${windowHtml("Descent boom (only if RTLS — unconfirmed)", descentW, l.net, !l.rtls, null)}
     </div>`;
 }
 
+/* Replaced with new Render function
 function render() {
   const container = document.getElementById("launches");
   container.innerHTML = launchData.map(launchCard).join("");
@@ -486,6 +535,36 @@ function render() {
     `Observer: ${locLabel} · ${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}`;
   document.getElementById("report-loc").textContent =
     `${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}`;
+}
+*/
+function render() {
+  const upcoming = [];
+  const recent  = [];
+
+  for (const l of launchData) {
+    // actual_launch_utc (webcast anchor) wins when present; else NET + window
+    // const anchor = l.actual_launch_utc || l.net; - Deleted during updates
+    const endMs  = new Date(l.actual_launch_utc
+                    ? l.actual_launch_utc
+                    : addMinutes(l.net, l.window_min || 0)).getTime();
+    (Date.now() < endMs ? upcoming : recent).push(l);
+  }
+
+  document.getElementById("launches").innerHTML =
+    upcoming.map(launchCard).join("") ||
+    '<p class="footnote">Nothing on the manifest — check back after the next LL2 ingest.</p>';
+  document.getElementById("recent-launches").innerHTML =
+    recent.map(launchCard).join("");
+
+  document.getElementById("loc-note").textContent =
+    `Observer: ${locLabel} · ${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}`;
+  document.getElementById("report-loc").textContent = `${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}`;
+}
+
+function addMinutes(iso, min) {
+  const d = new Date(iso);
+  d.setMinutes(d.getMinutes() + min);
+  return d.toISOString();
 }
 
 /* ---------- report form ---------- */
@@ -508,11 +587,17 @@ function buildReportDropdown() {
 
 let reportStamp = null;
 
+function updateStampDisplay() {
+  const el = document.getElementById("stamp-display");
+  el.textContent = reportStamp
+    ? "STAMPED: " + reportStamp +
+      " (" + new Date(reportStamp).toLocaleTimeString() + " local)"
+    : "Not stamped — press STAMP to lock in when you heard it.";
+}
+
 function stampNow() {
   reportStamp = new Date().toISOString();
-  const el = document.getElementById("stamp-display");
-  el.textContent = "Stamped: " + reportStamp +
-    " (" + new Date(reportStamp).toLocaleTimeString() + " local)";
+  updateStampDisplay();
 }
 
 function setReportMsg(text, cls) {
@@ -520,6 +605,8 @@ function setReportMsg(text, cls) {
   el.textContent = text;
   el.className = cls || "";
 }
+
+
 
 async function submitReport() {
   const launchId = document.getElementById("report-launch").value;
@@ -534,7 +621,12 @@ async function submitReport() {
   };
   const mag = document.getElementById("magnitude").value;
   if (mag !== "") payload.magnitude = parseInt(mag, 10);
-  if (reportStamp) payload.observed_utc = reportStamp;
+  // if (reportStamp) payload.observed_utc = reportStamp;
+  if (!reportStamp) {
+    setReportMsg("⛔ Press STAMP first — the timestamp is the data.", "err");
+    return;
+  }
+   payload.observed_utc = reportStamp; 
 
   const btn = document.getElementById("submit-report");
   btn.disabled = true;
@@ -549,7 +641,8 @@ async function submitReport() {
     if (r.ok && body.ok) {
       setReportMsg(`✓ Logged — report #${body.report_id}. Thank you.`, "ok");
       reportStamp = null;
-      document.getElementById("stamp-display").textContent = "";
+      updateStampDisplay();
+      // document.getElementById("stamp-display");
     } else {
       setReportMsg("Rejected: " + (body.error || "unknown error") +
         (r.status === 404 ? " (launch not found in database)" : ""), "err");
@@ -624,6 +717,7 @@ document.getElementById("geo").addEventListener("click", () => {
 document.getElementById("addcustom").addEventListener("click", addCustom);
 document.getElementById("stamp").addEventListener("click", stampNow);
 document.getElementById("submit-report").addEventListener("click", submitReport);
+updateStampDisplay();
 
 loadLoc();
 render();
