@@ -4,11 +4,15 @@ Crowdsourced sonic-boom tracking for orbital launches from Vandenberg SFB.
 Predicts when and where launch-associated sonic booms will be heard, collects
 ground-truth observations from listeners, and aggregates them into verdicts.
 
-**Status: live and self-updating as of 2026-11-20. Pipeline migrated from a Cloudflare cron worker to a local poller — first unattended run caught a launch slip 8 minutes after the source updated.**
+**Status: live, self-updating, and calibration-grade as of 2026-11-23.**
+First real observation dataset collected (USSF-317, Nov 20: 7 reports, two
+sites, launch-ordered arrival times — ascent-boom hypothesis confirmed).
+Pipeline: local poller → authenticated admin ingest → D1; frontend and API
+harden continuously against lessons from each launch event (see docs/TRACKER.md).
 
 - Calculator: **https://boomwatch.pages.dev**
 - API: **https://boomwatch-api.cloudflare-sporty919.workers.dev** (`/health`, `/launches`, `/report`, `POST /admin/ingest` — auth'd)
-- Ingest: local poller (`local-poller/poll.py`) on the builder's Mac mini, **4× daily** via launchd (00:00/06:00/12:00/18:00 local — cadence is a plist edit away if freshness demands more)
+- Ingest: local poller (`local-poller/poll.py`) on the builder's Mac mini, **4× daily** via launchd
 - DB: Cloudflare D1 (`boomwatch-db`)
 
 ## How it works
@@ -20,25 +24,36 @@ Three tiers on Cloudflare's free tier, no build step, one SQLite database:
    (`ll.thespacedevs.com`, v2.2.0) from the home IP's clean 15 req/hr bucket —
    transforms them to the D1 contract, and pushes them through the
    authenticated `POST /admin/ingest` route on the API worker. Scheduled by
-   launchd (`com.boomwatch.poller`, plist tracked in
-   `local-poller/`), verified unattended. If the Mac was asleep at poll
-   time, launchd runs the job once on wake.
-   - The former `boomwatch-ingest` cron worker is **retired**: its triggers
-     were deleted via the Cloudflare dashboard and its `wrangler.toml` cron
-     lines are commented out. The code stays as the canonical TypeScript
-     reference for the transform contract. **Do not casually uncomment those
-     cron lines** — the comment is load-bearing; a deploy would resurrect a
-     pipeline that now fights the LL2 rate limit (see below).
-2. **API (on-demand).** `boomwatch-api` serves public reads (launch list with
-   predictions, launch detail) and accepts crowdsourced boom reports
-   (heard yes/no/unsure, loudness 1-5, wall-clock `observed_utc` stamped at
-   the moment of hearing, reporter lat/lon). Strict field validation; `trust`
-   defaults to 0.5 until the verdict engine refines it.
+   launchd (`com.boomwatch.poller`), verified unattended.
+   - The former `boomwatch-ingest` cron worker is **retired**; its code stays
+     as the canonical TypeScript reference. **Do not casually uncomment its
+     cron lines** — a deploy would resurrect a pipeline that fights the LL2
+     rate limit.
+   - **Launch-anchor convention:** LL2 rewrites `net_utc` to actual liftoff
+     ~2 hours post-flight (confirmed on two consecutive launches). The
+     `launches.actual_launch_utc` column records the true T-0 — webcast-
+     observed when available (preferred, ±2–3 s human), LL2-derived otherwise
+     (flagged). All T+ math uses `actual_launch_utc`; LL2-vs-webcast deltas
+     are logged (USSF-317: −20 s, LL2 ahead).
+2. **API (on-demand).** `boomwatch-api` serves public reads and report intake:
+   - `/launches` covers the **next 30 days + last 30 days** — flown launches
+     remain listed and reportable (calibration record), and rows include
+     `actual_launch_utc` and `window_min`.
+   - `/report` requires a **wall-clock `observed_utc` timestamp** (rejected
+     server-side without one — matches the frontend's mandatory STAMP flow),
+     computes `distance_km` server-side (haversine to SLC-4E), and accepts
+     heard yes/no/unsure, optional loudness 1–5, boom sequence 1–3,
+     reporter lat/lon. `trust` defaults to 0.5 until the verdict engine
+     refines it; ambiguous provenance is down-weighted, never guess-relabelled.
 3. **Frontend (static).** Single-file calculator at `frontend/index.html`:
-   predicted boom windows per launch per city (peak = crossover + sound-speed
-   propagation), live fetch from the API with embedded-snapshot fallback,
-   custom-location/GPS support, and the report form ("Stamp time NOW" captures
-   the wall-clock datum). Model math mirrors `shared/sites.ts`.
+   predicted boom windows per launch per city, live fetch with embedded-snapshot
+   fallback, custom-location/GPS support, and a **stamp-first report form**
+   (dominant STAMP button at top; submit blocked until stamped; fresh stamp
+   required per boom; loudness explicitly optional). Launches split into
+   **Upcoming** and **Recent** sections (anchor-based); the report dropdown
+   defaults to the temporally-closest launch; multi-day countdowns format as
+   `Nd H:MM:SS`; a NET-change badge flags schedule slips between fetches.
+   Model math mirrors `shared/sites.ts`.
 
 ## The physics model (v0)
 
@@ -46,28 +61,25 @@ Surface sound speed 343 m/s. Ascent boom sourced at SLC-4E, with a profile
 slack window (−60/+180 s) around a fitted Mach-crossover (currently T+60 s).
 A descent/return boom profile (crossover T+600 s, sourced at LZ-4) exists but
 is conditioned on an RTLS recovery — **droneship launches have no descent
-boom**, so check the mission profile before setting expectations. Windows are
-expectations, not appointments: refraction and winds shift arrivals by tens
-of seconds. First calibration anchor: Ventura, ~133 km from the pad, observed
-boom ≈ T+8 min after liftoff on droneship-profile launches.
+boom**. Windows are expectations, not appointments: refraction and winds
+shift arrivals by tens of seconds.
 
-The falsification protocol: on the first observed launch, wall-clock boom
-timestamps vs. webcast T+0 discriminate the ascent hypothesis (early peak
-~T+8½ min at Ventura) from the descent hypothesis (late, ~T+16-17 min, RTLS
-only). Two cities reporting (Ventura + Santa Barbara, ~90-100 s propagation
-offset) turn one observation into a corroborated measurement.
+**Calibration status (1 launch, 2 sites):** USSF-317 (droneship, Nov 20)
+produced correctly range-ordered arrivals — Santa Barbara T+5:24, Ventura
+T+7:30–8:25 — confirming the ascent-carpet hypothesis (H1) at both sites.
+Earliest firm Ventura stamp T+7:32 vs nominal window open ~T+7:30. The
+original falsification protocol is considered executed for the droneship
+case; an RTLS launch remains needed to test the descent-boom profile.
 
 ## Why the ingest is local (a short war story)
 
 Cloudflare Workers egress presents to LL2 as effectively **one shared client
-identity** for the entire platform (`2a06:98c0:3600::`) — every Discord
-launch bot and hobby notifier included. The unauthenticated 15 req/hr bucket
-was measured **full before our first request**, at unrelated hours. No cron
-schedule dodges that. The fix wasn't spending money or tuning minutes — it
-was changing identity: the home IP has its own clean bucket (measured 10/15
-per poller run; ~40 of a possible ~360 requests/day at 4× daily, enormous
-headroom to raise cadence). The API-key route (LL2 Patreon) remains the
-documented escalation if the home bucket ever tightens.
+identity** for the entire platform — the unauthenticated 15 req/hr bucket was
+measured **full before our first request**, at unrelated hours. No cron
+schedule dodges that. The fix was changing identity: the home IP has its own
+clean bucket (~10/15 per poller run; ~40 of ~360 possible requests/day at 4×
+daily — headroom to raise cadence). The API-key route (LL2 Patreon) remains
+the documented escalation if the home bucket ever tightens.
 
 ## Local development
 
@@ -110,8 +122,9 @@ poller migration that resolved them all architecturally.
   before publicizing.
 - CORS allowlist is broader than intended (`*.pages.dev` suffix match) —
   tightening queued.
-- `reports.distance_km` unpopulated (verdict-cron's job).
 - Verdict-cron (Bayesian aggregation) not yet built — awaits first real data.
+- No status column on launches — LL2's post-flight net_utc rewrite is currently 
+  silent until the anchor column is populated manually.
 - Recovery type is not auto-ingested for national-security missions (LL2
   data is sparse); cross-check the provider's page and update manually —
   exactly how the USSF-317 droneship profile was resolved.
