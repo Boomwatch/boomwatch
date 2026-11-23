@@ -287,7 +287,12 @@ function normalizeApiRows(rows) {
     let L = map.get(row.id);
     if (!L) {
       L = { id: row.id, name: row.mission || "Unnamed",
-            net: row.net_utc, rtls: row.recovery_type === "rtls", preds: [] };
+            net: row.net_utc, rtls: row.recovery_type === "rtls", preds: [],
+            actual_launch_utc: row.actual_launch_utc || undefined,
+            window_min: Number.isFinite(row.window_min) ? row.window_min : 0 };
+      
+      /*L = { id: row.id, name: row.mission || "Unnamed",
+            net: row.net_utc, rtls: row.recovery_type === "rtls", preds: [] }; */
       map.set(row.id, L);
     }
     if (row.profile_id) {

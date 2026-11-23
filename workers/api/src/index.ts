@@ -54,16 +54,32 @@ const json = (status: number, body: unknown, origin: string | null) =>
 const badRequest = (msg: string, origin: string | null) =>
   json(400, { ok: false, error: msg }, origin);
 
+// Mirror of PAD_SLC4E in frontend/index.html & shared/sites.ts — KEEP IN SYNC.
+const PAD_LAT = 34.632, PAD_LON = -120.611, EARTH_R_M = 6371000;
+
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const toRad = (d: number) => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat/2)**2 +
+    Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+  return (2 * EARTH_R_M * Math.asin(Math.sqrt(a))) / 1000;
+}
+
+
+
 /* ---------------------- handlers ---------------------- */
 
 async function getLaunches(env: Env, origin: string | null): Promise<Response> {
-  // Upcoming = from 2h ago forward (covers launches in progress/reports)
+  // Serve upcoming + recently-flown launches: recent ones stay reportable
+  // (dropdown + late calibration reports). 30-day floor keeps the list sane;
+  // frontend splits upcoming vs recent on its side.
   const { results } = await env.DB.prepare(
-    `SELECT l.id, l.mission, l.net_utc, l.recovery_type,
+    `SELECT l.id, l.mission, l.net_utc, l.actual_launch_utc, l.window_min,
+            l.recovery_type,
             p.boom_seq, p.profile_id, p.crossover_s, p.confidence
      FROM launches l
      LEFT JOIN predictions p ON p.launch_id = l.id
-     WHERE l.net_utc >= datetime('now', '-2 hours')
+     WHERE l.net_utc >= datetime('now', '-30 days')
      ORDER BY l.net_utc ASC, p.boom_seq ASC
      LIMIT 100`
   ).all();
@@ -73,7 +89,7 @@ async function getLaunches(env: Env, origin: string | null): Promise<Response> {
 
 async function getLaunchDetail(env: Env, id: string, origin: string | null): Promise<Response> {
   const launch = await env.DB.prepare(
-    `SELECT id, mission, net_utc, recovery_type
+    `SELECT id, mission, net_utc, actual_launch_utc, window_min, recovery_type
      FROM launches WHERE id = ?`
   ).bind(id).first();
 
@@ -86,6 +102,7 @@ async function getLaunchDetail(env: Env, id: string, origin: string | null): Pro
 
   return json(200, { ok: true, launch, predictions: preds ?? [] }, origin);
 }
+
 
 interface IngestLaunchRow {
   id: string; site_id: string; provider: string; vehicle: string;
@@ -123,17 +140,16 @@ async function postReport(env: Env, body: ReportBody, origin: string | null): Pr
   if (!Number.isInteger(seqNum) || seqNum < 1 || seqNum > 3)
     return badRequest("boom_seq must be an integer 1–3", origin);
 
-  // Wall-clock time the user heard it — optional but strongly preferred.
-  // Validates parseable ISO 8601 and roughly current (±48h) to catch garbage.
-  let observed: string | null = null;
-  if (body.observed_utc !== undefined && body.observed_utc !== null) {
-    if (typeof body.observed_utc !== "string")
-      return badRequest("observed_utc must be an ISO 8601 string", origin);
-    const t = Date.parse(body.observed_utc);
-    if (!Number.isFinite(t) || Math.abs(Date.now() - t) > 48 * 3600 * 1000)
-      return badRequest("observed_utc is not a plausible timestamp", origin);
-    observed = body.observed_utc;
-  }
+
+  // Wall-clock time the user heard it — REQUIRED (matches frontend guard;
+  // unstamped reports are calibration-dead weight). Valid ISO 8601, ±48h.
+  if (typeof body.observed_utc !== "string")
+    return badRequest("observed_utc is required (ISO 8601) — press STAMP first", origin);
+  const t = Date.parse(body.observed_utc);
+  if (!Number.isFinite(t) || Math.abs(Date.now() - t) > 48 * 3600 * 1000)
+    return badRequest("observed_utc is not a plausible timestamp", origin);
+  const observed = body.observed_utc;
+
 
   let magnitude: number | null = null;
   if (body.magnitude !== undefined && body.magnitude !== null) {
@@ -156,14 +172,18 @@ async function postReport(env: Env, body: ReportBody, origin: string | null): Pr
   ).bind(body.launch_id).first();
   if (!launch) return json(404, { ok: false, error: "unknown launch_id" }, origin);
 
-  /* --- insert; trust uses schema default 0.5, verdict-cron refines later --- */
+  /* --- insert; distance computed to pad source (KEEP-IN-SYNC mirror),
+       trust uses schema default 0.5, verdict-cron refines later --- */
+
+  const distanceKm = haversineKm(lat, lon, PAD_LAT, PAD_LON);
 
   const info = await env.DB.prepare(
     `INSERT INTO reports
-       (launch_id, boom_seq, heard, magnitude, observed_utc, lat, lon, created_utc)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+       (launch_id, boom_seq, heard, magnitude, observed_utc, lat, lon,
+        distance_km, created_utc)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(body.launch_id, seqNum, heard, magnitude, observed, lat, lon,
-         new Date().toISOString()).run();
+         distanceKm, new Date().toISOString()).run();
 
   return json(201, {
     ok: true,
