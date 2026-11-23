@@ -587,7 +587,21 @@ function buildReportDropdown() {
   sel.innerHTML = reportable.map(l =>
     `<option value="${l.id}">${l.name} — ${fmtNetLocal(l.net)}</option>`
   ).join("");
-  if (prev && reportable.some(l => l.id === prev)) sel.value = prev;
+  // Default to the temporally-closest launch (about to fly / in flight / just flew)
+  // — the one a reporter is most likely filing about. An explicit prior
+  // selection always wins, so navigation isn't stomped on 5-min refreshes.
+  if (prev && reportable.some(l => l.id === prev)) {
+    sel.value = prev;
+  } else {
+    const now = Date.now();
+    let best = null, bestAbs = Infinity;
+    for (const l of reportable) {
+      const anchor = l.actual_launch_utc || l.net;   // anchor convention
+      const abs = Math.abs(now - new Date(anchor).getTime());
+      if (abs < bestAbs) { bestAbs = abs; best = l.id; }
+    }
+    if (best) sel.value = best;
+  }
 }
 
 let reportStamp = null;
